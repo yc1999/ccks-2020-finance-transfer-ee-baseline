@@ -90,15 +90,16 @@ def get_torch_mrc_all_train_data():
     dic1['paragraphs'] = lst
     dic2['data'] = [dic1]
     dic2['version'] = '1.1'
-    data = json.dumps(dic2,ensure_ascii=False,indent=0)
+    data = json.dumps(dic2,ensure_ascii=False,indent=2)
     out_file.write(data)
     print('Mrc模型的train集转换完成!')
 
 def get_mrc_test_data():
     print('Mrc模型的test集转换中...')
-    cls_out = pd.read_csv('CCKS-Cls/test_output/cls_out.csv')
-    test_data = pd.read_csv('CCKS-Cls/pybert/dataset/test.csv')
-    all_cls_test_df = test_data.merge(cls_out, on='id')
+    cls_out = pd.read_csv('CCKS-Cls/test_output/base/cls_out.csv')   # TODO: 这里是预测出的结果
+    test_data = pd.read_csv('CCKS-Cls/pybert/dataset/test_base.csv') # TODO: 这里是ground-truth
+    #all_cls_test_df = test_data.merge(cls_out, on='id')
+    all_cls_test_df = test_data
     out_file = open('CCKS-Mrc/data/squad_like_test.json','w')
     lst = []
     dic1 = {}

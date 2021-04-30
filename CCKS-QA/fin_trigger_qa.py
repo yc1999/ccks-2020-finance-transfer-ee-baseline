@@ -51,7 +51,8 @@ class AceExample(object):
     A single training/test example for the ace dataset.
     """
 
-    def __init__(self, sentence, events, s_start):
+    def __init__(self, id, sentence, events, s_start):
+        self.id = id
         self.sentence = sentence
         self.events = events
         self.s_start = s_start
@@ -80,8 +81,6 @@ class InputFeatures(object):
                  #
                  event_type, argument_type, fea_trigger_offset, sentence_offset,
                  #
-                 start_position=None, end_position=None,
-                 #
                  labels=None):
 
         self.example_id = example_id
@@ -96,9 +95,6 @@ class InputFeatures(object):
         self.argument_type = argument_type
         self.fea_trigger_offset = fea_trigger_offset
         self.sentence_offset = sentence_offset
-
-        self.start_position = start_position
-        self.end_position = end_position
 
         self.labels = labels
 
@@ -120,8 +116,8 @@ def read_ace_examples(input_file, cached_examples_file, is_training):
         examples = torch.load(cached_examples_file)
     else:
         for example in tqdm(raw_data,desc="read_ace_examples"):
-            sentence, events, s_start = example["sentence"], example["event"], example["s_start"]
-            example = AceExample(sentence=sentence, events=events, s_start=s_start)
+            id, sentence, events, s_start = example["id"], example["sentence"], example["event"], example["s_start"]
+            example = AceExample(id=id, sentence=sentence, events=events, s_start=s_start)
             examples.append(example)
         logger.info("Saving examples into cached file %s", cached_examples_file)
         if(cached_examples_file.parent.exists() == False):
@@ -166,97 +162,99 @@ def convert_examples_to_features(examples, tokenizer, query_templates, nth_query
     else:
 
         for (example_id, example) in enumerate(tqdm(examples,desc="convert_examples_to_features")):
-            # 需要遍历所有的事件，每一个事件里面的每一个argument作为一个训练样本
-            for event in example.events:
-                trigger_offset = event[0][0] - example.s_start
-                event_type = event[0][2]    # 这里修改为[2]
-                trigger_token = example.sentence[event[0][0]:event[0][1]+1]    # 找出trigger是哪个词语
+            # 从此处开始构建新的example
+            event_type = example.events[0][0][2]
+            query = query_templates[event_type]["trigger"][nth_query]
+            query = query.replace("[trigger]", event_type)
 
-                # 从此处开始构建新的example
-                query = query_templates[event_type]["trigger"][nth_query]
-                query = query.replace("[trigger]", event_type)
+            # prepare [CLS] query [SEP] sentence [SEP]
+            tokens = []
+            segment_ids = []
+            token_to_orig_map = {}  # 用于映射bert_input的token位置到原始sentence的位置
 
-                # prepare [CLS] query [SEP] sentence [SEP]
-                tokens = []
-                segment_ids = []
-                token_to_orig_map = {}  # 用于映射bert_input的token位置到原始sentence的位置
+            # add [CLS]
+            tokens.append("[CLS]")
+            segment_ids.append(0)
 
-                # add [CLS]
-                tokens.append("[CLS]")
+            # add query
+            query_tokens = tokenizer.tokenize(query)
+            for token in query_tokens:
+                tokens.append(token)
                 segment_ids.append(0)
 
-                # add query
-                query_tokens = tokenizer.tokenize(query)
-                for token in query_tokens:
-                    tokens.append(token)
-                    segment_ids.append(0)
+            # add [SEP]
+            tokens.append("[SEP]")
+            segment_ids.append(0)
 
-                # add [SEP]
-                tokens.append("[SEP]")
-                segment_ids.append(0)
-
-                # add sentence
-                tmpcnt = 0
-                for (i, token) in enumerate(example.sentence):
-                    # 需要特殊处理转义字符
-                    if(token in [' ', '\t', '\n']):
-                        token = '[BLANK]'
-                    token_to_orig_map[len(tokens)] = i  # 当前位置和原始句子位置的映射
-                    if not len(tokenizer.tokenize(token)):
-                        sub_tokens = ['[INV]']
-                    else:
-                        sub_tokens = tokenizer.tokenize(token)
-                    assert len(sub_tokens) >0 , f"{example_id} -- {example.sentence} -- 位置{i}处出现tokenize失败单词: {token}"
-                    tokens.append(sub_tokens[0])
-                    segment_ids.append(1)
-                    tmpcnt += 1
-                assert tmpcnt == len(example.sentence),"tokens and sentence must be the same"
-
-                # add [SEP]
-                tokens.append("[SEP]")
+            # add sentence
+            tmpcnt = 0
+            for (i, token) in enumerate(example.sentence):
+                # 需要特殊处理转义字符
+                if(token in [' ', '\t', '\n']):
+                    token = '[BLANK]'
+                token_to_orig_map[len(tokens)] = i  # 当前位置和原始句子位置的映射
+                if not len(tokenizer.tokenize(token)):
+                    sub_tokens = ['[INV]']
+                else:
+                    sub_tokens = tokenizer.tokenize(token)
+                assert len(sub_tokens) >0 , f"{example_id} -- {example.sentence} -- 位置{i}处出现tokenize失败单词: {token}"
+                tokens.append(sub_tokens[0])
                 segment_ids.append(1)
+                tmpcnt += 1
+            assert tmpcnt == len(example.sentence),"tokens and sentence must be the same"
 
-                # transform to input_ids ...
-                input_ids = tokenizer.convert_tokens_to_ids(tokens)
-                input_mask = [1] * len(input_ids)
-                while len(input_ids) < max_seq_length:
-                    input_ids.append(0)
-                    input_mask.append(0)
-                    segment_ids.append(0)
+            # add [SEP]
+            tokens.append("[SEP]")
+            segment_ids.append(1)
 
-                # start & end position
-                start_position, end_position = None, None
+            # transform to input_ids ...
+            input_ids = tokenizer.convert_tokens_to_ids(tokens)
+            input_mask = [1] * len(input_ids)
+            while len(input_ids) < max_seq_length:
+                input_ids.append(0)
+                input_mask.append(0)
+                segment_ids.append(0)
 
-                sentence_start = example.s_start
-                sentence_offset = len(query_tokens) + 2
-                fea_trigger_offset = trigger_offset + sentence_offset
+            sentence_start = example.s_start
+            sentence_offset = len(query_tokens) + 2
 
+            if_trigger_ids = None     # 标注是否是trigger
+            labels = None
+
+            if is_training:
+                labels = [[0] * 2 for i in range(max_seq_length)]
                 if_trigger_ids = [0] * len(segment_ids)     # 标注是否是trigger
-                trigger_len = event[0][1] - event[0][0] + 1
-                # 掌握全新Python技能
-                if_trigger_ids[fea_trigger_offset:fea_trigger_offset+trigger_len] = [1] * trigger_len
-                #if_trigger_ids[fea_trigger_offset] = 1
+                # 需要遍历所有的事件，每一个事件里面的每一个argument作为一个训练样本
+                if len(example.events) > 1:
+                    #print("yes")
+                    pass
 
-                if is_training:
+                for event in example.events:
+                    trigger_offset = event[0][0] - example.s_start
+                    event_type = event[0][2]   # 这里修改为[2]
+                    fea_trigger_offset = trigger_offset + sentence_offset
+                    trigger_len = event[0][1] - event[0][0] + 1
+                    # 掌握全新Python技能
+                    if_trigger_ids[fea_trigger_offset:fea_trigger_offset+trigger_len] = [1] * trigger_len
+
                     answer_start, answer_end = event[0][0], event[0][1] # 触发词的start和end
 
                     start_position = answer_start - sentence_start + sentence_offset
                     end_position = answer_end - sentence_start + sentence_offset
-
-                    labels = [[0] * 2 for i in range(max_seq_length)]
                     labels[start_position][0] = 1   # 设置start为True
                     labels[end_position][1] = 1 # 设置end为True
-                    # TODO: 这个InputFeature里面好像很多是不需要的，例如argument_type
-                    features.append(InputFeatures(example_id=example_id, tokens=tokens, token_to_orig_map=token_to_orig_map, input_ids=input_ids, input_mask=input_mask, segment_ids=segment_ids, if_trigger_ids=if_trigger_ids,
-                                                  event_type=event_type, argument_type="trigger", fea_trigger_offset=fea_trigger_offset, sentence_offset = sentence_offset,
-                                                  start_position=start_position, end_position=end_position, labels = labels))
-                else:
-                    start_position = None
-                    end_position = None
-                    labels = None
-                    features.append(InputFeatures(example_id=example_id, tokens=tokens, token_to_orig_map=token_to_orig_map, input_ids=input_ids, input_mask=input_mask, segment_ids=segment_ids, if_trigger_ids=if_trigger_ids,
+
+                # TODO: 这个InputFeature里面好像很多是不需要的，例如argument_type
+                features.append(InputFeatures(example_id=example_id, tokens=tokens, token_to_orig_map=token_to_orig_map, input_ids=input_ids, input_mask=input_mask, segment_ids=segment_ids, if_trigger_ids=if_trigger_ids,
                                               event_type=event_type, argument_type="trigger", fea_trigger_offset=fea_trigger_offset, sentence_offset = sentence_offset,
-                                              start_position=start_position, end_position=end_position, labels=labels))
+                                            labels = labels))
+            else:
+                labels = None
+                fea_trigger_offset = None
+                features.append(InputFeatures(example_id=example_id, tokens=tokens, token_to_orig_map=token_to_orig_map, input_ids=input_ids, input_mask=input_mask, segment_ids=segment_ids, if_trigger_ids=if_trigger_ids,
+                                              event_type=event_type, argument_type="trigger", fea_trigger_offset=fea_trigger_offset, sentence_offset = sentence_offset,
+                                              labels=labels))
+
 
         logger.info("Saving features into cached file %s",cached_features_file)
         if cached_features_file.parent.exists() == False:
@@ -567,19 +565,18 @@ def evaluate(args, model, device, eval_dataloader, eval_examples, gold_examples,
     pred_logits = None
 
     model.eval()
-    for idx, (input_ids, input_mask, segment_ids, if_trigger_ids, example_indices) in enumerate(tqdm(eval_dataloader)):
+    for idx, (input_ids, input_mask, segment_ids, example_indices) in enumerate(tqdm(eval_dataloader)):
         # input_ids, input_mask, segment_ids, if_trigger_ids: shape of [batch_size, max_seq_len]
         if pred_only and idx % 10 == 0:
             logger.info("Running test: %d / %d" % (idx, len(eval_dataloader)))
         input_ids = input_ids.to(device)
         input_mask = input_mask.to(device)
         segment_ids = segment_ids.to(device)
-        if_trigger_ids = if_trigger_ids.to(device)
         with torch.no_grad():
             if not args.add_if_trigger_embedding:
                 tmp_pred = model(input_ids, segment_ids, input_mask)[0].cpu().numpy()
             else:
-                tmp_pred = model(input_ids, segment_ids, if_trigger_ids, input_mask).cpu().numpy()
+                tmp_pred = model(input_ids, segment_ids, input_mask).cpu().numpy()
         if pred_logits is None:
             pred_logits = tmp_pred
         else:
@@ -593,18 +590,18 @@ def evaluate(args, model, device, eval_dataloader, eval_examples, gold_examples,
     tp, fp, fn = 0, 0, 0
     preds = []
 
-    # TODO: 考虑到一个事件可能由多个触发词构成, 需要对数据集重新进行改造，将同一事件触发词收集到一起。
     for tmp_pred, gold_example, eval_feature in zip(pred_logits, gold_examples, eval_features):
         # 找到当前example的触发词的位置和大小
-        trigger_start = gold_example.events[0][0][0]
-        trigger_end = gold_example.events[0][0][1]
-        gt_triggers = [[trigger_start,trigger_end]]
+        gt_triggers = []
+        for event in gold_example.events:
+            gt_triggers.append(event[0][:2])
 
         tmp_pred = tmp_pred[eval_feature.sentence_offset:eval_feature.sentence_offset+len(gold_example.sentence)] # 只看这一个范围之内的内容
         # tmp_pred shape of [seq_len, 2]
         pred_triggers = pointer_trigger_decode(tmp_pred, gold_example.sentence,
                                                start_threshold = start_threshold,
-                                               end_threshold = end_threshold)
+                                               end_threshold = end_threshold,
+                                               one_trigger=False) # 需要特别修改的地方
         preds.append(pred_triggers) #加入到输出结果中
 
         if not len(pred_triggers):
@@ -686,9 +683,8 @@ def main(args):
         all_input_ids = torch.tensor([f.input_ids for f in eval_features], dtype=torch.long)
         all_input_mask = torch.tensor([f.input_mask for f in eval_features], dtype=torch.long)
         all_segment_ids = torch.tensor([f.segment_ids for f in eval_features], dtype=torch.long)
-        all_if_trigger_ids = torch.tensor([f.if_trigger_ids for f in eval_features], dtype=torch.long)
         all_example_index = torch.arange(all_input_ids.size(0), dtype=torch.long)   # 这是新的example_index，与feature里面的example_id是不同的概念，这个example_index的范围比example_id大些
-        eval_data = TensorDataset(all_input_ids, all_input_mask, all_segment_ids, all_if_trigger_ids, all_example_index)
+        eval_data = TensorDataset(all_input_ids, all_input_mask, all_segment_ids, all_example_index)
         eval_dataloader = DataLoader(eval_data, batch_size=args.eval_batch_size)
 
     if args.do_train:
@@ -714,12 +710,8 @@ def main(args):
         all_input_ids = torch.tensor([f.input_ids for f in train_features], dtype=torch.long)
         all_input_mask = torch.tensor([f.input_mask for f in train_features], dtype=torch.long)
         all_segment_ids = torch.tensor([f.segment_ids for f in train_features], dtype=torch.long)
-        all_if_trigger_ids = torch.tensor([f.if_trigger_ids for f in train_features], dtype=torch.long)
-        all_start_positions = torch.tensor([f.start_position for f in train_features], dtype=torch.long)
-        all_end_positions = torch.tensor([f.end_position for f in train_features], dtype=torch.long)
         all_labels = torch.tensor([f.labels for f in train_features],dtype=torch.long)
-        train_data = TensorDataset(all_input_ids, all_input_mask, all_segment_ids, all_if_trigger_ids,
-                                   all_start_positions, all_end_positions, all_labels)
+        train_data = TensorDataset(all_input_ids, all_input_mask, all_segment_ids,all_labels)
         train_dataloader = DataLoader(train_data, batch_size=args.train_batch_size)
         train_batches = [batch for batch in train_dataloader]
 
@@ -739,7 +731,7 @@ def main(args):
         for lr in lrs:
             if not args.add_if_trigger_embedding:
                 if args.task_type == "trans":
-                    model = TriggerExtractor.from_pretrained("output/fin_args_qa_thresh_output/trigger/base_bz16/best-model")   # TODO: 需要更改
+                    model = TriggerExtractor.from_pretrained("output/fin_args_qa_thresh_output/trigger/tmp/best-model")   # TODO: 需要更改
                 elif args.resume_path != "":
                     model = TriggerExtractor.from_pretrained(args.resume_path)  # 加载checkpoint
                 else:
@@ -836,11 +828,11 @@ def main(args):
                 for step, batch in enumerate(tqdm(train_batches)):
                     if n_gpu == 1:
                         batch = tuple(t.to(device) for t in batch)
-                    input_ids, input_mask, segment_ids, if_trigger_ids, start_positions, end_positions, labels = batch  # 输入到模型中的数据
+                    input_ids, input_mask, segment_ids, labels = batch  # 输入到模型中的数据
                     if not args.add_if_trigger_embedding:
-                        loss = model(input_ids, segment_ids, input_mask, start_positions, end_positions, labels)[0]
+                        loss = model(input_ids, segment_ids, input_mask, labels)[0]
                     else:
-                        loss = model(input_ids, segment_ids, if_trigger_ids, input_mask, start_positions, end_positions)
+                        loss = model(input_ids, segment_ids, input_mask, labels)
                     if n_gpu > 1:
                         loss = loss.mean()
                     if args.gradient_accumulation_steps > 1:
@@ -934,12 +926,11 @@ def main(args):
             all_input_ids = torch.tensor([f.input_ids for f in eval_features], dtype=torch.long)
             all_input_mask = torch.tensor([f.input_mask for f in eval_features], dtype=torch.long)
             all_segment_ids = torch.tensor([f.segment_ids for f in eval_features], dtype=torch.long)
-            all_if_trigger_ids = torch.tensor([f.if_trigger_ids for f in eval_features], dtype=torch.long)
             all_example_index = torch.arange(all_input_ids.size(0), dtype=torch.long)
-            eval_data = TensorDataset(all_input_ids, all_input_mask, all_segment_ids, all_if_trigger_ids, all_example_index)
+            eval_data = TensorDataset(all_input_ids, all_input_mask, all_segment_ids, all_example_index)
             eval_dataloader = DataLoader(eval_data, batch_size=args.eval_batch_size)
         if not args.add_if_trigger_embedding:
-            model = BertForQuestionAnswering.from_pretrained(args.model_dir)
+            model = TriggerExtractor.from_pretrained(args.model_dir)
         else:
             model = BertForQuestionAnswering_withIfTriggerEmbedding.from_pretrained(args.model_dir)
         if args.fp16:
@@ -949,33 +940,21 @@ def main(args):
         # 这里的preds是make_predictions()函数output的结果，并不是通过threshold之后的结果
         result, preds = evaluate(args, model, device, eval_dataloader, eval_examples, gold_examples, eval_features, pred_only=True)
 
+        logger.info("!!! Test %s : p_c: %.2f, r_c: %.2f, f1_c: %.2f" %
+                    (args.eval_metric, result["prec_c"], result["recall_c"], result["f1_c"]))
+
         with open(os.path.join(args.model_dir, "test_results.txt"), "w") as writer:
             for key in result:
                 writer.write("%s = %s\n" % (key, str(result[key])))
         with open(os.path.join(args.model_dir, "arg_predictions.json"), "w") as writer:
-            for key in preds:
-                writer.write(json.dumps(preds[key], default=int, ensure_ascii=False) + "\n")    # 中文要加入ensure_ascii=False
-
-        ### old
-
-        # na_prob_thresh = 1.0
-        # if args.version_2_with_negative:  # 获取最佳的na_prob_thresh
-        #     eval_result_file = os.path.join(args.output_dir, "eval_results.txt")
-        #     if os.path.isfile(eval_result_file):
-        #         with open(eval_result_file) as f:
-        #             for line in f.readlines():
-        #                 if line.startswith('best_f1_thresh'):
-        #                     na_prob_thresh = float(line.strip().split()[-1])
-        #                     logger.info("na_prob_thresh = %.6f" % na_prob_thresh)
-
-        # result, preds, _ = \
-        #     evaluate(args, model, device, eval_dataset,
-        #              eval_dataloader, eval_examples, eval_features,
-        #              na_prob_thresh=na_prob_thresh,
-        #              pred_only=args.eval_test)
-        # with open(os.path.join(args.output_dir, "predictions.json"), "w") as writer:
-        #     writer.write(json.dumps(preds, indent=4) + "\n")
-
+            # preds中就是一个一个trigger区间，我们要得到的是完整的example，因此还要加入id，sentence，s_start等等信息。
+            for idx, pred in enumerate(preds):
+                example = dict()
+                example["id"] = eval_examples[idx].id
+                example["sentence"] = eval_examples[idx].sentence
+                example["s_start"] = eval_examples[idx].s_start
+                example["event"] = [ [trigger] for trigger in pred]
+                writer.write(json.dumps(example, default=int, ensure_ascii=False) + "\n")    # 中文要加入ensure_ascii=False
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()

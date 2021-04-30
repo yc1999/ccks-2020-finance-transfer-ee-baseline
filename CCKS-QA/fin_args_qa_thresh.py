@@ -124,6 +124,8 @@ def read_ace_examples(input_file, cached_examples_file, is_training):
             example = AceExample(sentence=sentence, events=events, s_start=s_start)
             examples.append(example)
         logger.info("Saving examples into cached file %s", cached_examples_file)
+        if(cached_examples_file.parent.exists() == False):
+            cached_examples_file.parent.mkdir(parents=True)
         torch.save(examples, cached_examples_file)
     return examples
 
@@ -256,6 +258,8 @@ def convert_examples_to_features(examples, tokenizer, query_templates, nth_query
                                                       event_type=event_type, argument_type=argument_type, fea_trigger_offset=fea_trigger_offset,
                                                       start_position=start_position, end_position=end_position))
         logger.info("Saving features into cached file %s",cached_features_file)
+        if cached_features_file.parent.exists() == False:
+            cached_features_file.parent.mkdir(parents=True)
         torch.save(features, cached_features_file)
         return features
 
@@ -686,11 +690,11 @@ def main(args):
 
     if args.do_train or (not args.eval_test):
         eval_examples = read_ace_examples(input_file=args.dev_file,
-                                          cached_examples_file=Path.cwd() / args.dataset / f"cached_dev_{args.task_type}_examples_{args.arch}",
+                                          cached_examples_file=Path.cwd() / "dataset" / f"cached_dev_{args.task_type}_examples_{args.arch}", #Path.cwd() / args.dataset / f"cached_dev_{args.task_type}_examples_{args.arch}",
                                           is_training=False)
         # TODO: 这里的gold_examples使用的也是dev_file，原作者的书写是错误的，他在GitHub的issues里面有说
         gold_examples = read_ace_examples(input_file=args.dev_file,
-                                          cached_examples_file=Path.cwd() / args.dataset / f"cached_dev_{args.task_type}_examples_{args.arch}",
+                                          cached_examples_file=Path.cwd() / "dataset" / f"cached_dev_{args.task_type}_examples_{args.arch}", #Path.cwd() / args.dataset / f"cached_dev_{args.task_type}_examples_{args.arch}",
                                           is_training=False)
         eval_features = convert_examples_to_features(
             examples=eval_examples,
@@ -699,8 +703,7 @@ def main(args):
             nth_query=args.nth_query,
             is_training=False,
             cached_features_file=
-            Path.cwd() / args.dataset / "cached_dev_{}_features_{}_{}".format(
-            args.task_type,args.max_seq_length, args.arch)
+            Path.cwd() / "dataset" / "cached_dev_{}_features_{}_{}".format(args.task_type,args.max_seq_length, args.arch)# Path.cwd() / args.dataset / "cached_dev_{}_features_{}_{}".format(args.task_type,args.max_seq_length, args.arch)
         )
         logger.info("***** Dev *****")
         logger.info("  Num orig examples = %d", len(eval_examples))
@@ -760,7 +763,12 @@ def main(args):
             [1e-6, 2e-6, 3e-6, 5e-6, 1e-5, 2e-5, 3e-5, 5e-5]
         for lr in lrs:
             if not args.add_if_trigger_embedding:
-                model = BertForQuestionAnswering.from_pretrained(args.model, cache_dir=PYTORCH_PRETRAINED_BERT_CACHE)
+                if args.task_type == "trans":
+                    model = BertForQuestionAnswering.from_pretrained("output/fin_args_qa_thresh_output/base_bz16/best-model")
+                elif args.resume_path != "":
+                    model = BertForQuestionAnswering.from_pretrained(args.resume_path)  # 加载checkpoint
+                else:
+                    model = BertForQuestionAnswering.from_pretrained(args.model, cache_dir=PYTORCH_PRETRAINED_BERT_CACHE)
             else:
                 model = BertForQuestionAnswering_withIfTriggerEmbedding.from_pretrained(args.model, cache_dir=PYTORCH_PRETRAINED_BERT_CACHE)
             if args.fp16:
@@ -789,18 +797,65 @@ def main(args):
                             if any(nd in n for nd in no_decay)], 'weight_decay': 0.0}
             ]
 
-            optimizer = BertAdam(optimizer_grouped_parameters,
+            state = dict()
+            if args.resume_path != "":
+                # 载入checkpoints文件
+                state = torch.load(os.path.join(args.resume_path, 'checkpoint_info.bin'))
+                optimizer = BertAdam()
+                optimizer.load_state_dict(state['optimizer_state_dict'])
+                tr_loss = state["tr_loss"]
+                nb_tr_examples = state["nb_tr_examples"]
+                nb_tr_steps = state["nb_tr_examples"]
+                global_step = state["global_step"]
+            else:
+                optimizer = BertAdam(optimizer_grouped_parameters,
                                  lr=lr,
                                  warmup=args.warmup_proportion,
                                  t_total=num_train_optimization_steps)
-            tr_loss = 0
-            nb_tr_examples = 0
-            nb_tr_steps = 0
-            global_step = 0
+                tr_loss = 0
+                nb_tr_examples = 0
+                nb_tr_steps = 0
+                global_step = 0
+
             start_time = time.time()
-            for epoch in range(int(args.num_train_epochs)):
+
+            # 需要调整epoch的起始位置
+            if args.resume_path != "":
+                start_epoch = state["epoch"]
+            else:
+                start_epoch = 0
+
+            for epoch in range(start_epoch,int(args.num_train_epochs)):
                 model.train()
                 logger.info("Start epoch #{} (lr = {})...".format(epoch, lr))
+
+                # 在这个时候保存一下checkpoint！
+                logger.info("Saving checkpoint at epoch #{} (lr = {})...".format(epoch, lr))
+                model_to_save = model.module if hasattr(model, 'module') else model
+                subdir = os.path.join(args.output_dir, "epoch{epoch}".format(epoch=epoch))  # 注意目录的不同
+                if not os.path.exists(subdir):
+                    os.makedirs(subdir)
+                output_model_file = os.path.join(subdir, WEIGHTS_NAME)
+                output_config_file = os.path.join(subdir, CONFIG_NAME)
+                torch.save(model_to_save.state_dict(), output_model_file)
+                model_to_save.config.to_json_file(output_config_file)
+                tokenizer.save_vocabulary(subdir)
+                # if best_result:
+                #     with open(os.path.join(args.output_dir, "eval_results.txt"), "w") as writer:
+                #         for key in sorted(best_result.keys()):
+                #             writer.write("%s = %s\n" % (key, str(best_result[key])))
+                # 保存epoch, optimizer_state_dict, loss。其实需要的也只有step=0的~
+                state = dict()
+                state["epoch"] = epoch
+                state["optimizer_state_dict"] = optimizer.state_dict()
+                state["tr_loss"] = tr_loss
+                state["nb_tr_examples"] = nb_tr_examples
+                state["nb_tr_steps"] = nb_tr_steps
+                state["global_step"] = global_step
+                state_dir = os.path.join(subdir, "checkpoint_info.bin")
+                torch.save(state, state_dir)
+                ################################
+
                 if args.train_mode == 'random' or args.train_mode == 'random_sorted':
                     random.shuffle(train_batches)
                 for step, batch in enumerate(train_batches):
@@ -1007,6 +1062,10 @@ if __name__ == "__main__":
     parser.add_argument("--dataset", type=str, default="dataset")
     parser.add_argument("--task_type", type=str)
     parser.add_argument("--arch",type=str)
+
+    # model checkpoints 功能
+    parser.add_argument("--resume_path", type=str, default="")
+
     args = parser.parse_args()
 
     if max_seq_length != args.max_seq_length: max_seq_length = args.max_seq_length

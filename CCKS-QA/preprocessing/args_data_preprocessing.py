@@ -1,7 +1,7 @@
 # -*- coding:utf-8 -*-
 """
 @Project ：eeqa_yc 
-@File    ：data_analysis.py
+@File    ：args_data_preprocessing.py
 @IDE     ：PyCharm 
 @Author  ：yc1999
 @Date    ：2021/4/18 15:00 
@@ -318,7 +318,8 @@ if __name__ == "__main__":
     #stat_arg_lenth()
 
     # Step 7: 统计每个文件下的eval_results的结果，然后平均
-    # get_mean_res()
+    get_mean_res()
 
     # Step 8: 分析数据集中，一个事件的触发词是否都一样，这里需要用到原始数据集！
-    analyze_trigger()
+    # analyze_trigger()
+    pass

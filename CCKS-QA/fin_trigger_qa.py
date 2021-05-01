@@ -477,7 +477,7 @@ def pointer_trigger_decode(logits, raw_text, start_threshold=0.5, end_threshold=
     # 对于每一个_start 都尝试给它找一个最短的，长度在3以内的trigger
     for _start in start_ids:
         for _end in range(_start,_start+3):
-            # 限定 trigger 长度不能超过3
+            # 限定 trigger 长度不能超过3，这个作为超参数，不知道可不可以进行调整。
             if _end in end_ids:
                 # (start, end, start_logits + end_logits)
                 candidate_entities.append([_start, _end, logits[_start][0] + logits[_end][1]])

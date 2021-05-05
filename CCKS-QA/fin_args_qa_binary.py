@@ -173,11 +173,11 @@ def convert_examples_to_features(examples, tokenizer, query_templates, nth_query
             # 需要遍历所有的事件，每一个事件里面的每一个argument作为一个训练样本
             for event in example.events:
                 trigger_offset = event[0][0] - example.s_start
-                event_type = event[0][2]    # 这里修改为[2]
+                event_type = event[0][2]
                 trigger_token = example.sentence[event[0][0]:event[0][1]+1]    # 找出trigger是哪个词语
                 arguments = event[1:]   # 得到所有的argument，[[73, 73, 'Vehicle'], [78, 78, 'Artifact'], [82, 82, 'Destination']]
                 for argument_type in query_templates[event_type]:   # 遍历这个事件类型拥有的所有argument
-                    if argument_type == "trigger":
+                    if argument_type == "trigger":  # 需要跳过触发词类型的论元
                         continue
                     query = query_templates[event_type][argument_type][nth_query]
                     query = query.replace("[trigger]", trigger_token)
@@ -235,11 +235,13 @@ def convert_examples_to_features(examples, tokenizer, query_templates, nth_query
                     trigger_len = event[0][1] - event[0][0] + 1
                     # 掌握全新Python技能
                     if_trigger_ids[fea_trigger_offset:fea_trigger_offset+trigger_len] = [1] * trigger_len
-                    #if_trigger_ids[fea_trigger_offset] = 1
-
 
                     if is_training:
                         no_answer = True
+                        labels = [[0] * 2 for i in range(max_seq_length)]
+                        start_position = 0
+                        end_position = 0
+
                         for argument in arguments:
                             gold_argument_type = argument[2]
                             if gold_argument_type == argument_type:
@@ -250,13 +252,13 @@ def convert_examples_to_features(examples, tokenizer, query_templates, nth_query
                                 end_position = answer_end - sentence_start + sentence_offset
 
                                 # 构建label
-                                labels = [[0] * 2 for i in range(max_seq_length)]
                                 labels[start_position][0] = 1   # 设置start为True
                                 labels[end_position][1] = 1 # 设置end为True
-
-                                features.append(InputFeatures(example_id=example_id, tokens=tokens, token_to_orig_map=token_to_orig_map, input_ids=input_ids, input_mask=input_mask, segment_ids=segment_ids, if_trigger_ids=if_trigger_ids,
-                                                              event_type=event_type, argument_type=argument_type, fea_trigger_offset=fea_trigger_offset, sentence_offset = sentence_offset,
-                                                              start_position=start_position, end_position=end_position, labels=labels))    # 每个argument都要对应一个feature
+                        
+                        if no_answer == False:
+                            features.append(InputFeatures(example_id=example_id, tokens=tokens, token_to_orig_map=token_to_orig_map, input_ids=input_ids, input_mask=input_mask, segment_ids=segment_ids, if_trigger_ids=if_trigger_ids,
+                                                          event_type=event_type, argument_type=argument_type, fea_trigger_offset=fea_trigger_offset, sentence_offset = sentence_offset,
+                                                          start_position=start_position, end_position=end_position, labels=labels))    # TODO 每个argument role都要对应一个feature
                         if no_answer:
                             start_position, end_position = 0, 0
 
@@ -441,7 +443,8 @@ def evaluate(args, model, device, eval_dataloader, eval_examples, gold_examples,
             all_results.append(RawResult(example_id=example_id, event_type_offset_argument_type=event_type_offset_argument_type,
                                          start_logits=start_logits, end_logits=end_logits))
 
-    # preds是一个OrderedDict，key为example_id，value就是模型预测得到的结果的list，{..., 5: [['Movement.Transport_Destination', [15, 15]], ['Movement.Transport_Origin', [15, 15]]], ... }
+    # preds是一个OrderedDict，key为example_id，value就是模型预测得到的结果的list.
+    # {..., 5: [['Movement.Transport_Destination', [15, 15]], ['Movement.Transport_Origin', [15, 15]]], ... }
     preds = make_predictions(eval_examples, eval_features, all_results, args.n_best_size, args.max_answer_length, args.larger_than_cls)    # 没有看懂n_best_size的意思
 
     # get all_gold, all_gold也是OrderedDict()类型的。 里面每个论元的格式为: [event_type_argument_type, [start_offset, end_offset]]
@@ -575,10 +578,10 @@ def main(args):
 
     if args.do_train or (not args.eval_test):
         eval_examples = read_ace_examples(input_file=args.dev_file,
-                                          cached_examples_file=Path.cwd() / "dataset/args" / f"cached_dev_{args.task_type}_examples_{args.arch}", #Path.cwd() / args.dataset / f"cached_dev_{args.task_type}_examples_{args.arch}",
+                                          cached_examples_file=Path.cwd() / "dataset/args_mul_arg" / f"cached_dev_{args.task_type}_examples_{args.arch}", #Path.cwd() / args.dataset / f"cached_dev_{args.task_type}_examples_{args.arch}",
                                           is_training=False)
         gold_examples = read_ace_examples(input_file=args.dev_file,
-                                          cached_examples_file=Path.cwd() / "dataset/args" / f"cached_dev_{args.task_type}_examples_{args.arch}", #Path.cwd() / args.dataset / f"cached_dev_{args.task_type}_examples_{args.arch}",
+                                          cached_examples_file=Path.cwd() / "dataset/args_mul_arg" / f"cached_dev_{args.task_type}_examples_{args.arch}", #Path.cwd() / args.dataset / f"cached_dev_{args.task_type}_examples_{args.arch}",
                                           is_training=False)
         eval_features = convert_examples_to_features(
             examples=eval_examples,
@@ -587,7 +590,7 @@ def main(args):
             nth_query=args.nth_query,
             is_training=False,
             cached_features_file=
-            Path.cwd() / "dataset/args" / "cached_dev_{}_features_{}_{}".format(args.task_type,args.max_seq_length, args.arch)# Path.cwd() / args.dataset / "cached_dev_{}_features_{}_{}".format(args.task_type,args.max_seq_length, args.arch)
+            Path.cwd() / "dataset/args_mul_arg" / "cached_dev_{}_features_{}_{}".format(args.task_type,args.max_seq_length, args.arch)# Path.cwd() / args.dataset / "cached_dev_{}_features_{}_{}".format(args.task_type,args.max_seq_length, args.arch)
         )
         logger.info("***** Dev *****")
         logger.info("  Num orig examples = %d", len(eval_examples))
@@ -602,9 +605,8 @@ def main(args):
         eval_dataloader = DataLoader(eval_data, batch_size=args.eval_batch_size)
 
     if args.do_train:
-        # TODO: convert_examples_to_features函数中is_training的作用非常重要
         train_examples = read_ace_examples(input_file=args.train_file,
-                                           cached_examples_file=Path.cwd() / args.dataset / f"cached_train_{args.task_type}_examples_{args.arch}",
+                                           cached_examples_file=Path.cwd() / args.dataset / f"cached_train_{args.task_type}_examples_{args.arch}",  # 在这里使用args.dataset是为了few-shot着想
                                            is_training=True)
         train_features = convert_examples_to_features(
             examples=train_examples,
@@ -658,9 +660,6 @@ def main(args):
                 model = BertForQuestionAnswering_withIfTriggerEmbedding.from_pretrained(args.model, cache_dir=PYTORCH_PRETRAINED_BERT_CACHE)
             if args.fp16:
                 model.half()
-            # model.to(device)
-            # if n_gpu > 1:
-            #     model = torch.nn.DataParallel(model)
 
             # 需要重新写一下如何进行多卡训练
             gpu_ids = args.gpu_ids.split(',')
@@ -725,10 +724,7 @@ def main(args):
                 torch.save(model_to_save.state_dict(), output_model_file)
                 model_to_save.config.to_json_file(output_config_file)
                 tokenizer.save_vocabulary(subdir)
-                # if best_result:
-                #     with open(os.path.join(args.output_dir, "eval_results.txt"), "w") as writer:
-                #         for key in sorted(best_result.keys()):
-                #             writer.write("%s = %s\n" % (key, str(best_result[key])))
+
                 # 保存epoch, optimizer_state_dict, loss。其实需要的也只有step=0的~
                 state = dict()
                 state["epoch"] = epoch
@@ -750,7 +746,7 @@ def main(args):
                     if not args.add_if_trigger_embedding:
                         loss = model(input_ids, segment_ids, input_mask, labels)[0]
                     else:
-                        loss = model(input_ids, segment_ids, if_trigger_ids, input_mask, start_positions, end_positions)
+                        loss = model(input_ids, segment_ids, if_trigger_ids, input_mask, labels)
                     if n_gpu > 1:
                         loss = loss.mean()
                     if args.gradient_accumulation_steps > 1:
@@ -862,6 +858,22 @@ def main(args):
         with open(os.path.join(args.model_dir, "arg_predictions.json"), "w") as writer:
             for key in preds:
                 writer.write(json.dumps(preds[key], default=int, ensure_ascii=False) + "\n")    # 中文要加入ensure_ascii=False
+        with open(os.path.join(args.model_dir, "arg_predictions_new.json"), "w") as writer:
+            for key in preds:
+                # 输出需要像原始文件一样
+                example = dict()
+                example["sentence"] = eval_examples[key].sentence
+                example["s_start"] = eval_examples[key].s_start
+                example["event"] = []
+                example["event"].append([])
+                # 首先把触发词接上
+                example["event"][0].append(eval_examples[key].events[0][0])
+                for arg in preds[key]:
+                    arg_role = arg[0].split("_")[1]
+                    span = arg[1]
+                    span.append(arg_role)
+                    example["event"][0].append(span)
+                writer.write(json.dumps(example, default=int, ensure_ascii=False) + "\n")    # 中文要加入ensure_ascii=False
 
 
 if __name__ == "__main__":
